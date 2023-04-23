@@ -1,0 +1,382 @@
+---
+title: "Data Analysis - NYPD Shooting"
+date: "04/23/2023"
+output:
+  html_document:
+    toc: true
+    fig_caption: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+#### Dataset information
+* Observations: 25.6K, a shooting incident for each
+* Variables: 19
+* List of every shooting incident that occurred in NYC going back to 2006 through the end of the previous calendar year.
+
+    __Attributes__
+
+    * INCIDENT_KEY : Randomly generated persistent ID for each arrest (Plain Text)
+    * OCCUR_DATE : Exact date of the shooting incident (Date & Time)
+    * OCCUR_TIME : Exact time of the shooting incident (Plain Text)
+    * BORO : Borough where the shooting incident occurred (Plain Text)
+    * PRECINCT : Precinct where the shooting incident occurred (Number)
+    * JURISDICTION_CODE : Jurisdiction where the shooting incident occurred. Jurisdiction codes 0(Patrol), 1(Transit) and 2(Housing) represent NYPD whilst codes 3 and more represent non NYPD jurisdictions (Number)
+    * LOCATION_DESC : Location of the shooting incident (Plain Text)
+    * STATISTICAL_MURDER_FLAG : Shooting resulted in the victim's death which would be counted as a murder (Bool)
+    * PERP_AGE_GROUP : Perpetrator's age within a category (Plain Text)
+    * PERP_SEX : Perpetrator's sex description (Plain Text)
+    * PERP_RACE : Perpetrator's race description (Plain Text)
+    * VIC_AGE_GROUP : Victim's age within a category (Plain Text)
+    * VIC_SEX : Victim's sex description (Plain Text)
+    * VIC_RACE : Victim's race description (Plain Text)
+    * X_COORD_CD : Midblock X-coordinate for New York State Plane Coordinate System, Long Island Zone, NAD 83, units feet (FIPS 3104) (Plain Text)
+    * Y_COORD_CD : Midblock Y-coordinate for New York State Plane Coordinate System, Long Island Zone, NAD 83, units feet (FIPS 3104) (Plain Text)
+    * Latitude : Latitude coordinate for Global Coordinate System, WGS 1984, decimal degrees (EPSG 4326) (Number)
+    * Longitude : Longitude coordinate for Global Coordinate System, WGS 1984, decimal degrees (EPSG 4326) (Number)
+    
+[<u>Reference</u>](https://data.cityofnewyork.us/Public-Safety/NYPD-Shooting-Incident-Data-Historic-/833y-fsy8 )
+
+#### ETL Process
+
+```{r pkg, message=FALSE}
+# Packages used in the project
+require(tidyverse)
+require(lubridate)
+require(cowplot) # Used to align ggplot
+require(leaflet) # Mark incidents on a map
+library(jtools) # Print summary of the model
+```
+
+
+Load data and see what's the data look like.
+
+
+```{r df}
+# Read data
+df <- read_csv("https://data.cityofnewyork.us/api/views/833y-fsy8/rows.csv?accessType=DOWNLOAD")
+# Preview
+head(df)
+```
+
+I usually change all the column names to lower case, and we can do this via the function, `tolower()`.  
+Then, select the columns we need in the analysis.
+
+```{r change_colname}
+# Transform the column names to lowercase
+names(df) <- tolower(names(df))
+
+# The following columns would be used for analysis
+df <- df %>% 
+    select(
+        c(occur_date, occur_time, location_desc,
+          statistical_murder_flag, perp_age_group, perp_sex, perp_race,
+          vic_age_group, vic_sex, vic_race, latitude, longitude)
+    )
+
+# Preview
+head(df)
+```
+
+
+From the result, we can see the data type of date variable is not a date object, 
+so we can change it via the function, `as.Date()`. 
+Then, I'd like to add a few columns related to date and time in order to view the dataset in different time ranges. 
+By the way, **though hour, month and year are numbers, I think it's better to see them as categorical variables rather than continuous ones**.
+It can be done through the function, `as.factor()`.
+
+```{r add_cols_and_change_dtype}
+# Use date data type for occur_date
+df$occur_date <- as.Date(df$occur_date, format = "%m/%d/%Y")
+
+# Get the hour & month when the incidents happened
+df <- df %>%
+    mutate(hour_of_the_day = hour(occur_time)) %>%
+    mutate(month = month(occur_date)) %>% 
+    mutate(year = year(occur_date))
+
+# Change data type
+df$hour_of_the_day <- as.factor(df$hour_of_the_day)
+df$month <- as.factor(df$month)
+df$year <- as.factor(df$year)
+
+# Preview
+head(df)
+```
+
+
+Okay, it seems we have done the basic data cleaning. Yeah~ 🎉 
+
+Let's take a look of the summary. 
+
+
+```{r summ}
+summary(df)
+```
+
+
+Oops, it occurs to me that I forgot an important step, handling missing values.  
+Let's see how many `NAs` among each column.
+
+
+```{r na_values}
+# Number of NAs in each columns
+print(colSums(is.na(df)))
+```
+
+Generally, missing values are among two different columns related to **location** and **perpetrator**.
+
+
+- For `location_desc`, since its data type is text, it can be excluded from the analysis.
+
+- For `perp_age_group`, `perp_sex`, and `perp_race`, they are important variables and I will still use them in the analysis.
+However, there are too many missing values among them, so it's hard to find a suitable method to fill the NAs.
+Therfore, dropping the observations which containing NAs might be a more appropriate choice.
+
+```{r}
+# Exclude location_desc
+df <- df %>% 
+    select(-c(location_desc))
+
+# Remove rows with NA's 
+df <- drop_na(df)
+```
+```{r}
+print(colSums(is.na(df)))
+```
+
+Great! We have done the ETL process. Next, we will start **EDA(Exploratory Data Analysis)** process through visualization.
+It's my favorite part of the analysis, let's go!
+
+#### EDA 
+
+The data was recorded for 15 years, we can group the cases in different time span, and see how the cases change.
+
+```{r fig1, fig.width=18, fig.height=6}
+# Distribution of the incidents by hour_of_the_day, month, year
+
+# By hour_of_the_day
+p1 <- df %>% ggplot(aes(x = hour_of_the_day)) +
+    geom_bar()+
+    labs(title = "Distribution Of The Incidents by Hour")+
+    xlab("Hour Of The Day")+
+    ylab("Incidents")+
+    theme(
+    plot.title = element_text(color="steelblue", size=14, face="bold.italic"),
+    axis.title.x = element_text(size=12, face="bold"),
+    axis.title.y = element_text(size=12, face="bold"),
+    axis.text.x = element_text(size = 10),
+    axis.text.y = element_text(size = 10)
+    )
+
+# By month
+p2 <- df %>% ggplot(aes(x = month))+
+    geom_bar()+
+    labs(title = "Distribution Of The Incidents by Month")+
+    xlab("Month")+
+    ylab("")+
+    theme(
+    plot.title = element_text(color="steelblue", size=14, face="bold.italic"),
+    axis.title.x = element_text(size=12, face="bold"),
+    axis.title.y = element_text(size=12, face="bold"),
+    axis.text.x = element_text(size = 10),
+    axis.text.y = element_text(size = 10)
+    )
+
+# By year
+p3 <- df %>% ggplot(aes(x = year))+
+    geom_bar()+
+    labs(title = "Distribution Of The Incidents by Year")+
+    xlab("Year")+
+    ylab("")+
+    theme(
+    plot.title = element_text(color="steelblue", size=14, face="bold.italic"),
+    axis.title.x = element_text(size=12, face="bold"),
+    axis.title.y = element_text(size=12, face="bold"),
+    axis.text.x = element_text(size = 10),
+    axis.text.y = element_text(size = 10)
+    )
+
+# Put the plots together
+plot_grid(p1, p2, p3, align = "h", nrow = 1)
+```
+
+By observing these three plots, 
+
+1. we can see the shooting incidents tend to happen at night, and from May to September, the incidents are much more than the other months.
+
+2. The incidents seem to decline year by year; however, the incidents soared in 2020 and 2021.
+The reason behind the fact is worth finding.
+
+```{r fig2, fig.width=12, fig.height=6}
+# Distribution of the incidents by vic_age_group, vic_sex, &  perp_age_group, perp_sex
+
+# By vic_age_group, vic_sex
+p1 <- df %>% ggplot(aes(x = vic_age_group, fill = vic_sex))+
+    geom_bar()+
+    labs(title = "Victim's Age Group By Sex")+
+    xlab("Age Group")+
+    ylab("Incidents")+
+    theme(
+    plot.title = element_text(color="steelblue", size=14, face="bold.italic"),
+    axis.title.x = element_text(size=12, face="bold"),
+    axis.title.y = element_text(size=12, face="bold"),
+    axis.text.x = element_text(size = 10),
+    axis.text.y = element_text(size = 10)
+    )
+
+# By perp_age_group, perp_sex
+p2 <- df %>% ggplot(aes(x = perp_age_group, fill = perp_sex))+
+    geom_bar() +
+    labs(title = "Perpetrator's Age Group By Sex")+
+    xlab("Age Group")+
+    ylab("")+
+    theme(
+    plot.title = element_text(color="steelblue", size=14, face="bold.italic"),
+    axis.title.x = element_text(size=12, face="bold"),
+    axis.title.y = element_text(size=12, face="bold"),
+    axis.text.x = element_text(size = 10),
+    axis.text.y = element_text(size = 10)
+    )
+
+# Put the plots together
+plot_grid(p1, p2)
+```
+
+By observing these two plots, 
+
+1. we can see that most victoms and perpetrators are male.
+
+
+```{r fig3, fig.width=18, fig.height=8}
+# Distribution of the incidents by vic_age_group, vic_race, &  perp_age_group, perp_race
+
+# By vic_age_group, vic_race
+p1 <- df %>% ggplot(aes(x = vic_age_group, fill = vic_race))+
+    geom_bar()+
+    labs(title = "Victim's Age Group By Race")+
+    xlab("Age Group")+
+    ylab("Cases")+
+    theme(
+    plot.title = element_text(color="steelblue", size=14, face="bold.italic"),
+    axis.title.x = element_text(size=12, face="bold"),
+    axis.title.y = element_text(size=12, face="bold"),
+    axis.text.x = element_text(size = 10),
+    axis.text.y = element_text(size = 10)
+    )
+
+# By perp_age_group, perp_race
+p2 <- df %>% ggplot(aes(x = perp_age_group, fill = perp_race))+
+    geom_bar() +
+    labs(title = "Perpetrator's Age Group By Race")+
+    xlab("Age Group")+
+    ylab("")+
+    theme(
+    plot.title = element_text(color="steelblue", size=14, face="bold.italic"),
+    axis.title.x = element_text(size=12, face="bold"),
+    axis.title.y = element_text(size=12, face="bold"),
+    axis.text.x = element_text(size = 10),
+    axis.text.y = element_text(size = 10)
+    )
+
+# Put the plots together
+plot_grid(p1, p2)
+```
+
+By observing these two plots, 
+
+1. we can see that most the race of victoms and perpetrators are black.
+
+```{r fig4, fig.width=5, fig.height=5}
+# Whether The Victim Was Murdered
+
+p1 <- df %>% ggplot(aes(x = vic_age_group, fill = statistical_murder_flag))+
+    geom_bar()+
+    labs(title = "Whether The Victim Was Murdered ", fill = "Murder")+
+    xlab("Age Group")+
+    ylab("Cases")+
+    theme(
+    plot.title = element_text(color="steelblue", size=14, face="bold.italic"),
+    axis.title.x = element_text(size=12, face="bold"),
+    axis.title.y = element_text(size=12, face="bold"),
+    axis.text.x = element_text(size = 10),
+    axis.text.y = element_text(size = 10)
+    )
+
+p1
+```
+From the data, we can see that most of the victoms survived during the incidents. However, I think it would be better if we can know more about whether the injury was serious or not.
+
+```{r map}
+# Mark the incidents on a map
+map <- leaflet(df) %>%
+    addProviderTiles(providers$CartoDB.Positron) %>%
+    addCircles(lat = ~latitude, lng = ~longitude)
+map
+```
+
+#### Bias
+
+- Personal Bias
+
+    Since I am not an American and I have never been to the US, my understanding of America is
+    mostly from news and it's limited. If my language offended you, that was not my intention. I apologize.
+
+    Thus, before I make plots related to sex and race, I thought the victoms would tend to be female. 
+    On the other hand, I thought the perpetrators would mostly be white and the victoms might mostly be black.
+
+    However, after making these plots, and examine the results, my bias is mitigated. 
+
+- Data Bias
+
+    From my observation, I could not find detailed information about how the data was recorded and who recorded them. Besides, the publisher didn't state that if there were any measures implemented to avoid bias.
+    
+    Therefore, the data may contain personal bias if the people who recorded it weren't aware of their own bias. In my opinion, I think it would be better for the publisher to give more detailed information about how they prevented personal bias.
+
+
+
+
+#### Modeling
+
+I implemented Linear Regression to see the relationship between `statistical_murder_flag` and `vic_age_group`,
+with different category encoding techniques applied to the two columns.
+
+```{r modeling}
+# Use Linear Regression Model
+
+# Transform the target as 0(False) and 1(True)
+df$statistical_murder_flag <- as.integer(as.logical(df$statistical_murder_flag))
+
+# Category encoding function, use leave one out technique
+encode_leave_one_out <- function(x, y, sigma = NULL) {
+    n <- length(x)
+    x[is.na(x)] <- "__MISSING"
+    x2 <- vapply(1:n, function(i) {
+      xval <- x[i]
+      yloo <- y[-i]
+      xloo <- x[-i]
+      yloo <- yloo[xloo == xval]
+      mean(yloo, na.rm = TRUE)
+    }, numeric(1))
+    if (!is.null(sigma)) {
+      x2 <- x2 * rnorm(n, mean = 1, sd = sigma)
+    }
+    x2
+}
+
+# Category encoding
+df2 <- df
+set.seed(18)
+df2[["vic_age_group_encoded"]] <- encode_leave_one_out(df[["vic_age_group"]], df[["statistical_murder_flag"]], sigma = 0.05)
+head(df2)
+
+# Modeling
+mod <- lm(statistical_murder_flag ~ vic_age_group_encoded, data = df2)
+# Check the summary of the model
+summ(mod)
+```
+
+From the model summary, the p-value is less than the significance level(0.05), so we can conclude that the victoms' age is correlated with the target, `statistical_murder_flag`.
+
